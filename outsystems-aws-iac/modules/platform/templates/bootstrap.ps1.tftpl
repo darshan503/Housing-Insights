@@ -1,0 +1,101 @@
+<powershell>
+# =============================================================================
+# OutSystems 11 server bootstrap (rendered by Terraform templatefile()).
+# Role: ${server_role}   Environment: ${environment}
+# =============================================================================
+$ErrorActionPreference = 'Stop'
+New-Item -ItemType Directory -Force -Path 'C:\ProgramData\OutSystemsBootstrap' | Out-Null
+Start-Transcript -Path 'C:\ProgramData\OutSystemsBootstrap\bootstrap.log' -Append
+
+$Role            = '${server_role}'
+$ControllerIp    = '${controller_ip}'
+$ArtifactsBucket = '${artifacts_bucket}'
+$InstallerKey    = '${installer_s3_key}'
+$DbEndpoint      = '${db_endpoint}'
+
+# 1. IIS + Windows features required by OutSystems Platform Server -------------
+Install-WindowsFeature -IncludeManagementTools -Name @(
+  'Web-Server', 'Web-Default-Doc', 'Web-Static-Content', 'Web-Http-Errors',
+  'Web-Http-Logging', 'Web-Request-Monitor', 'Web-Filtering', 'Web-Stat-Compression',
+  'Web-Dyn-Compression', 'Web-Net-Ext45', 'Web-Asp-Net45', 'Web-ISAPI-Ext',
+  'Web-ISAPI-Filter', 'Web-Windows-Auth', 'Web-Metabase', 'Web-Mgmt-Console',
+  'NET-Framework-45-ASPNET', 'NET-WCF-HTTP-Activation45', 'WAS'
+)
+
+# 2. HTTPS binding (ALB re-encrypts to the instance; ALB does not validate the cert)
+Import-Module WebAdministration
+if (-not (Get-WebBinding -Name 'Default Web Site' -Protocol https)) {
+  $cert = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation 'Cert:\LocalMachine\My' -NotAfter (Get-Date).AddYears(5)
+  New-WebBinding -Name 'Default Web Site' -Protocol https -Port 443
+  (Get-WebBinding -Name 'Default Web Site' -Protocol https).AddSslCertificate($cert.Thumbprint, 'my')
+}
+
+# Do not disclose ASP.NET version in response headers
+Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT' -Filter 'system.web/httpRuntime' -Name 'enableVersionHeader' -Value 'False'
+
+# 3. Host firewall mirrors the security groups ----------------------------------
+New-NetFirewallRule -DisplayName 'OutSystems HTTPS' -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+if ($Role -eq 'controller') {
+  New-NetFirewallRule -DisplayName 'OutSystems Deployment Controller' -Direction Inbound -Protocol TCP -LocalPort 12000 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+  New-NetFirewallRule -DisplayName 'OutSystems Cache Invalidation (RabbitMQ)' -Direction Inbound -Protocol TCP -LocalPort 5672 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+} else {
+  New-NetFirewallRule -DisplayName 'OutSystems Deployment Service' -Direction Inbound -Protocol TCP -LocalPort 12001 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+}
+
+# 4. CloudWatch agent: IIS logs, Application event log, memory/disk metrics ----
+$cwMsi = 'C:\ProgramData\OutSystemsBootstrap\amazon-cloudwatch-agent.msi'
+Invoke-WebRequest -UseBasicParsing -Uri 'https://s3.amazonaws.com/amazoncloudwatch-agent/windows/amd64/latest/amazon-cloudwatch-agent.msi' -OutFile $cwMsi
+Start-Process msiexec.exe -ArgumentList "/i `"$cwMsi`" /qn" -Wait
+$cwConfig = @'
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          { "file_path": "C:\\inetpub\\logs\\LogFiles\\W3SVC1\\*.log",
+            "log_group_name": "${log_group_prefix}/iis",
+            "log_stream_name": "{instance_id}" }
+        ]
+      },
+      "windows_events": {
+        "collect_list": [
+          { "event_name": "Application", "event_levels": ["ERROR", "WARNING"],
+            "log_group_name": "${log_group_prefix}/windows-events",
+            "log_stream_name": "{instance_id}" }
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "namespace": "OutSystems/${environment}",
+    "append_dimensions": { "InstanceId": "$${aws:InstanceId}", "AutoScalingGroupName": "$${aws:AutoScalingGroupName}" },
+    "metrics_collected": {
+      "Memory": { "measurement": ["% Committed Bytes In Use"] },
+      "LogicalDisk": { "measurement": ["% Free Space"], "resources": ["C:"] }
+    }
+  }
+}
+'@
+$cwConfigPath = 'C:\ProgramData\Amazon\AmazonCloudWatchAgent\outsystems.json'
+Set-Content -Path $cwConfigPath -Value $cwConfig -Encoding ASCII
+& 'C:\Program Files\Amazon\AmazonCloudWatchAgent\amazon-cloudwatch-agent-ctl.ps1' -a fetch-config -m ec2 -s -c "file:$cwConfigPath"
+
+# 5. Record bootstrap facts for the post-install configuration step -----------
+New-Item -Path 'HKLM:\SOFTWARE\OutSystemsBootstrap' -Force | Out-Null
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\OutSystemsBootstrap' -Name Role -Value $Role
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\OutSystemsBootstrap' -Name ControllerIp -Value $ControllerIp
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\OutSystemsBootstrap' -Name DbEndpoint -Value $DbEndpoint
+
+# 6. Optional unattended Platform Server install from the artifacts bucket ----
+if ($InstallerKey -ne '') {
+  $installer = 'C:\ProgramData\OutSystemsBootstrap\PlatformServer.exe'
+  Read-S3Object -BucketName $ArtifactsBucket -Key $InstallerKey -File $installer | Out-Null
+  Start-Process -FilePath $installer -ArgumentList '/S' -Wait
+  # Server configuration (server.hsconf, DB catalogs, controller registration)
+  # is applied afterwards with the OutSystems Configuration Tool via SSM Run
+  # Command, using the DB secret from Secrets Manager. See README.
+}
+
+Stop-Transcript
+</powershell>
+<persist>false</persist>
