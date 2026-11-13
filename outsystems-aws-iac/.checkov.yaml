@@ -1,0 +1,29 @@
+# Every skipped check below is either by design or a checkov limitation; each has a reason.
+framework:
+  - terraform
+skip-check:
+  # Security groups are attached through module outputs (ALB, EC2, RDS); checkov cannot follow them.
+  - CKV2_AWS_5
+  # KMS key policies must use Resource "*" (it means "this key"); the root statement is AWS's standard key-admin pattern.
+  - CKV_AWS_109
+  - CKV_AWS_111
+  - CKV_AWS_356
+  # Single region by design (Singapore data residency); objects are protected by versioning instead of replication.
+  - CKV_AWS_144
+  # No event-driven processing of these buckets.
+  - CKV2_AWS_62
+  # ALB access-log delivery only supports SSE-S3, so the logs bucket cannot use SSE-KMS.
+  - CKV_AWS_145
+  # The logs bucket is the access-log target; logging it into itself would loop.
+  - CKV_AWS_18
+  # Deletion protection follows is_production (on in prod.tfvars, off in throwaway non-prod); asserted by the policy tests.
+  - CKV_AWS_150
+  - CKV_AWS_293
+  # Port 80 is open on the ALB only to answer with an HTTP->HTTPS 301 redirect.
+  - CKV_AWS_260
+  # Flow-log retention comes from log_retention_days per environment: 365 in prod.tfvars.
+  - CKV_AWS_338
+  # AWSManagedRulesKnownBadInputsRuleSet (Log4j) is attached through a dynamic block checkov cannot evaluate;
+  # tests/platform.tftest.hcl asserts all 4 rules are present.
+  - CKV_AWS_192
+  - CKV2_AWS_76

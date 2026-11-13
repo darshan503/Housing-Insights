@@ -8,8 +8,8 @@ It hosts the three OutSystems modules of the *Singapore Housing Insights* applic
 | Module | Layer (Architecture Canvas) | Purpose | Infrastructure impact |
 |---|---|---|---|
 | `SingaporeHousingInsights` | End-user | Reactive UI and user interaction | Exposed via the ALB at `/SingaporeHousingInsights/`; used as the ALB health check |
-| `HousingInsights_core` | Core | Data model (`ResaleTransaction`) and business logic | Entities live in the Platform catalog on **RDS SQL Server** |
-| `HousingInsights_integration` | Integration | REST calls to `https://data.gov.sg` (HDB resale data) | Front-ends need **outbound HTTPS through the NAT gateway** |
+| `HousingInsights_CS` | Core | Market logic over live data: dashboard KPIs and charts computed in memory from a cached 6-month window, live paged search | No business tables; the Platform's own catalog lives on **RDS SQL Server** |
+| `HousingInsights_IS` | Integration | `ResaleSearch` over `https://data.gov.sg` datastore_search (HDB resale data) | Front-ends need **outbound HTTPS through the NAT gateway** |
 
 All three modules are published to the same OutSystems environment, so they share one server farm. Each
 environment (Dev, Test, Prod, and a dedicated LifeTime environment) is a separate, isolated copy of this stack.
@@ -74,7 +74,7 @@ environment (Dev, Test, Prod, and a dedicated LifeTime environment) is a separat
 │   ├── integration/                       # real AWS deploy → verify → destroy
 │   └── smoke/smoke-test.ps1               # post-deployment HTTP/TLS checks
 ├── scripts/run-tests.ps1                  # run the whole offline pipeline locally
-├── .github/workflows/iac-ci.yml           # CI pipeline
+├── ../.github/workflows/ci.yml            # CI pipeline (repo root)
 ├── .tflint.hcl  .checkov.yaml
 ```
 
@@ -109,8 +109,8 @@ Repeat for `test`, `prod` and `lifetime`. Each one uses its own backend key and 
    aws ssm start-session --target <controller-id> --document-name AWS-StartPortForwardingSession --parameters portNumber=443,localPortNumber=8443
    # browse https://localhost:8443/ServiceCenter
    ```
-5. Install the license, register the environment in **LifeTime**, and deploy `HousingInsights_integration` →
-   `HousingInsights_core` → `SingaporeHousingInsights` (consumer modules after producers).
+5. Install the license, register the environment in **LifeTime**, and deploy `HousingInsights_IS` →
+   `HousingInsights_CS` → `SingaporeHousingInsights` (consumer modules after producers).
 6. Point your DNS name (the one on the ACM certificate) at the `alb_dns_name` output and run the smoke test.
 
 ---
@@ -125,7 +125,7 @@ The tests are layered, from fast and free to slow and realistic:
 | 2 | Static validation | `terraform validate` | No | Syntax, types, references |
 | 3 | Linting | `tflint` + AWS ruleset | No | Invalid instance types, deprecated syntax, undocumented variables |
 | 4 | Security / compliance scan | `checkov` | No | CIS / AWS best practices. Every skipped check is justified in `.checkov.yaml` |
-| 5 | **Unit tests** | `terraform test` + `mock_provider` | No | 35 assertions on each module's behaviour (see below) |
+| 5 | **Unit tests** | `terraform test` + `mock_provider` | No | 35 test runs (70 assertions) on each module's behaviour (see below) |
 | 6 | **Policy tests** | `terraform test` on each `environments/*.tfvars` | No | Prod is HA (Multi-AZ, NAT per AZ, ≥2 front-ends), WAF and alarms on, cert in the right region, all 3 modules hosted |
 | 7 | **Integration tests** | `terraform test` against real AWS | Yes (costs money) | Deploys a throwaway stack, checks the live RDS, ALB and ASG through AWS APIs, checks `/ServiceCenter` returns 403 over HTTPS, then **destroys** the stack |
 | 8 | **Smoke tests** | `tests/smoke/smoke-test.ps1` | Deployed env | HTTP→HTTPS 301, TLS 1.0/1.1 refused and 1.2 accepted, admin consoles blocked, `SingaporeHousingInsights` responds, no version disclosure |
@@ -160,7 +160,7 @@ terraform test -test-directory=tests/integration -var="acm_certificate_arn=arn:a
 ./tests/smoke/smoke-test.ps1 -BaseUrl https://housing.example.com
 ```
 
-### Continuous integration (`.github/workflows/iac-ci.yml`)
+### Continuous integration (`.github/workflows/ci.yml` at the repository root)
 
 ```
 pull request / push to main

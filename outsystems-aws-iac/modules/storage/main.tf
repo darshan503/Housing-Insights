@@ -64,6 +64,32 @@ resource "aws_s3_bucket_policy" "artifacts" {
   depends_on = [aws_s3_bucket_public_access_block.artifacts]
 }
 
+resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id
+
+  rule {
+    id     = "tidy-old-versions"
+    status = "Enabled"
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = 90
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+}
+
+# S3 server access logs for the artifacts bucket go to the logs bucket (expired by its lifecycle rule).
+resource "aws_s3_bucket_logging" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id
+
+  target_bucket = aws_s3_bucket.logs.id
+  target_prefix = "s3-access/artifacts/"
+}
+
 # --- Logs --------------------------------------------------------------------
 resource "aws_s3_bucket" "logs" {
   bucket        = local.logs_bucket
@@ -134,6 +160,14 @@ resource "aws_s3_bucket_policy" "logs" {
         Principal = { Service = "logdelivery.elasticloadbalancing.amazonaws.com" }
         Action    = "s3:PutObject"
         Resource  = "${aws_s3_bucket.logs.arn}/alb/AWSLogs/${var.account_id}/*"
+      },
+      {
+        Sid       = "AllowS3ServerAccessLogs"
+        Effect    = "Allow"
+        Principal = { Service = "logging.s3.amazonaws.com" }
+        Action    = "s3:PutObject"
+        Resource  = "${aws_s3_bucket.logs.arn}/s3-access/*"
+        Condition = { StringEquals = { "aws:SourceAccount" = var.account_id } }
       },
       {
         Sid       = "DenyInsecureTransport"

@@ -1,0 +1,16 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+# Python / test output
+__pycache__/
+.venv/
+.pytest_cache/
+test-results/
+# OS
+.DS_Store
+Thumbs.db
